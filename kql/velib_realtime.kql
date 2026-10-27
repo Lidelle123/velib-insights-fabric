@@ -1,0 +1,87 @@
+// =====================================================================
+// Vélib' Insights — Real-Time Intelligence (Eventhouse eh_velib_realtime)
+// Table brute : velib_status (alimentée par l'Eventstream es_velib_status)
+// Raccourci OneLake : silver_station (table Delta de lh_silver)
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// 1. Couche « propre » : fonction qui type et nettoie la table brute
+// ---------------------------------------------------------------------
+.create-or-alter function with (folder = "clean", docstring = "velib_status typé et nettoyé")
+VelibStatus() {
+    velib_status
+    | extend ingestion_time = todatetime(ingestion_time),
+             last_reported  = todatetime(last_reported)
+    | project-away EventProcessedUtcTime, PartitionId, EventEnqueuedUtcTime
+}
+
+
+// ---------------------------------------------------------------------
+// 2. Contrôles de santé du pipeline
+// ---------------------------------------------------------------------
+
+// Nombre de relevés par jour (attendu : 96 = 24 h x 4)
+VelibStatus()
+| summarize releves = dcount(ingestion_time) by jour = startofday(ingestion_time)
+| order by jour asc
+
+// Nombre de stations par relevé (attendu : ~1 519)
+VelibStatus()
+| summarize stations = count() by ingestion_time
+| order by ingestion_time desc
+
+// Calibrage du seuil « station muette » à partir de la distribution des délais de signal
+// Résultat observé : P50 = 38 min, P90 = 43, P95 = 45, P99 = 12 611  -> seuil retenu : 60 min
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| extend minutes_sans_signal = datetime_diff('minute', ingestion_time, last_reported)
+| summarize percentiles(minutes_sans_signal, 50, 90, 95, 99), stations = count()
+
+
+// ---------------------------------------------------------------------
+// 3. Requêtes du Real-Time Dashboard rtd_velib_live
+// ---------------------------------------------------------------------
+
+// (A) Stations vides — vignette Stat, alerte Activator si > 150
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| summarize stations_vides = countif(bikes_available == 0 and is_renting == 1)
+
+// (B) Stations pleines
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| summarize stations_pleines = countif(docks_available == 0 and is_returning == 1)
+
+// (C) Vélos disponibles
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| summarize velos_disponibles = sum(bikes_available)
+
+// (D) Évolution électriques / mécaniques (reliée au filtre de temps du tableau de bord)
+VelibStatus()
+| where ingestion_time between (_startTime .. _endTime)
+| summarize electriques = sum(ebike), mecaniques = sum(mechanical) by ingestion_time
+| order by ingestion_time asc
+
+// (E) Stations vides en ce moment, avec nom et diagnostic (vide vs muette)
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| where bikes_available == 0 and is_renting == 1
+| lookup kind=leftouter (
+    external_table('silver_station') | project station_id, station_name, lat, lon, capacity
+  ) on station_id
+| extend minutes_sans_signal = datetime_diff('minute', ingestion_time, last_reported)
+| extend diagnostic = iff(minutes_sans_signal > 60, "Station muette (panne ?)", "Vide (rééquilibrage)")
+| project station_name, station_code, diagnostic, minutes_sans_signal, capacity
+| order by minutes_sans_signal desc
+
+// (F) Carte des stations à problème
+VelibStatus()
+| summarize arg_max(ingestion_time, *) by station_id
+| extend etat = case(bikes_available == 0 and is_renting == 1, "Vide",
+                     docks_available == 0 and is_returning == 1, "Pleine", "Normale")
+| where etat != "Normale"
+| lookup kind=leftouter (external_table('silver_station') | project station_id, station_name, lat, lon) on station_id
+| where isnotnull(lat)
+| project station_name, etat, bikes_available, docks_available, lat, lon

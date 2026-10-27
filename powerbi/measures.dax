@@ -1,0 +1,32 @@
+// =====================================================================
+// Vélib' Insights — Mesures DAX du modèle sémantique sm_velib (Direct Lake)
+// Tables : fact_station_hour (faits), dim_station, dim_hour (dimensions)
+// Relations : fact[station_id] -> dim_station[station_id] (plusieurs-à-un)
+//             fact[hour_ts]    -> dim_hour[hour_ts]       (plusieurs-à-un)
+// =====================================================================
+
+// Part du temps où une station est vide (format : pourcentage)
+% Temps vide =
+AVERAGE ( fact_station_hour[pct_time_empty] )
+
+// Part du temps où une station est pleine (format : pourcentage)
+% Temps plein =
+AVERAGE ( fact_station_hour[pct_time_full] )
+
+// Variante qui ignore les stations hors service (vides 100 % du temps) :
+// renvoie BLANK pour elles, ce qui les retire des visuels et du Top N.
+% Temps vide (stations actives) =
+VAR v = [% Temps vide]
+RETURN IF ( v < 0.99, v )
+
+// Nombre total de vélos dans Paris à une heure donnée, moyenné sur les heures.
+// Un simple SUM additionnerait toutes les heures entre elles.
+Vélos disponibles (moy. horaire) =
+AVERAGEX (
+    VALUES ( dim_hour[hour_ts] ),
+    CALCULATE ( SUM ( fact_station_hour[avg_bikes] ) )
+)
+
+// Nombre de stations présentes dans les données
+Stations suivies =
+DISTINCTCOUNT ( fact_station_hour[station_id] )

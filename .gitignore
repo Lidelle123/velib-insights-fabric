@@ -1,0 +1,11 @@
+# Secrets — ne jamais versionner
+_config/
+*conn*.txt
+*.env
+.env*
+
+# Divers
+.ipynb_checkpoints/
+__pycache__/
+.DS_Store
+Thumbs.db
